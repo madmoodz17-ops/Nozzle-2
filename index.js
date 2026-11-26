@@ -1,13 +1,10 @@
-// نص الطريق - ملف واحد بس، من غير ما تنزّل أي مكتبات
-// في Replit: اعمل Repl من نوع Node.js، وامسح اللي في index.js وحط الكود ده مكانه
-// وبعدين من Secrets ضيف: GOOGLE_MAPS_KEY = مفتاحك
-
+// نص الطريق - نسخة OpenStreetMap (من غير مفتاح)
 const http = require('http');
-const KEY = process.env.GOOGLE_MAPS_KEY || '';
-const events = {}; // الخروجات بتتخزن في الذاكرة (لو الـ Repl اتعمله restart بتتمسح)
+const events = {};
 
 const PAGE = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>نص الطريق</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 body{font-family:sans-serif;margin:0;padding:12px;max-width:600px;margin:auto}
 #map{height:45vh;border-radius:12px;margin:8px 0}
@@ -24,8 +21,9 @@ input{padding:10px;font-size:16px;width:100%;box-sizing:border-box;margin:4px 0}
 <button onclick="share()">شارك لوكيشني</button>
 <div id="map"></div><div id="mid"></div><div id="list"></div>
 <small>ابعت اللينك اللي فوق في المتصفح لصحابك</small></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-var EID='__ID__',map,markers=[],midKey='',PL=[],state={name:'',people:{},votes:{}};
+var EID='__ID__',map,pLayer,plLayer,midKey='',PL=[],state={name:'',people:{},votes:{}};
 if(EID){document.getElementById('home').style.display='none';document.getElementById('ev').style.display='block';}
 document.getElementById('who').value=localStorage.getItem('who')||'';
 
@@ -57,11 +55,6 @@ function km(a,b){
   return 2*R*Math.asin(Math.sqrt(h));
 }
 
-function init(){
-  if(!EID)return;
-  map=new google.maps.Map(document.getElementById('map'),{center:{lat:30.0444,lng:31.2357},zoom:11});
-  poll();setInterval(poll,4000);
-}
 function poll(){
   fetch('/api/e/'+EID).then(function(r){return r.json()}).then(function(s){
     state=s;document.getElementById('t').textContent=s.name;draw();
@@ -70,11 +63,13 @@ function poll(){
 
 function draw(){
   if(!map)return;
-  markers.forEach(function(m){m.setMap(null)});markers=[];
+  pLayer.clearLayers();
   var names=Object.keys(state.people);
   var pts=names.map(function(n){return state.people[n]});
   names.forEach(function(n){
-    markers.push(new google.maps.Marker({position:state.people[n],map:map,label:n.charAt(0)}));
+    var p=state.people[n];
+    L.circleMarker([p.lat,p.lng],{radius:9,color:'#1a73e8',fillOpacity:0.9})
+      .bindTooltip(esc(n),{permanent:true,direction:'top'}).addTo(pLayer);
   });
   if(pts.length<2){
     document.getElementById('mid').textContent='مستنيين اتنين على الأقل يشاركوا لوكيشنهم (دلوقتي: '+pts.length+')';
@@ -82,49 +77,66 @@ function draw(){
   }
   var c={lat:0,lng:0};
   pts.forEach(function(p){c.lat+=p.lat/pts.length;c.lng+=p.lng/pts.length});
-  markers.push(new google.maps.Marker({position:c,map:map,title:'نص الطريق',icon:'https://maps.google.com/mapfiles/ms/icons/green-dot.png'}));
+  L.circleMarker([c.lat,c.lng],{radius:12,color:'#0a0',fillOpacity:0.9})
+    .bindTooltip('نص الطريق',{permanent:true,direction:'bottom'}).addTo(pLayer);
   document.getElementById('mid').innerHTML='<h4>نقطة النص ✅ والأماكن القريبة منها:</h4>';
   var k=pts.length+':'+c.lat.toFixed(3)+','+c.lng.toFixed(3);
   if(k!==midKey){
     midKey=k;
-    var b=new google.maps.LatLngBounds();
-    pts.forEach(function(p){b.extend(p)});b.extend(c);map.fitBounds(b);
+    var b=L.latLngBounds(pts.map(function(p){return [p.lat,p.lng]}));
+    b.extend([c.lat,c.lng]);
+    map.fitBounds(b,{padding:[30,30]});
     find(c);
   } else render();
 }
 
 async function find(c){
   try{
-    var lib=await google.maps.importLibrary('places');
-    var r=await lib.Place.searchNearby({
-      fields:['id','displayName','location','rating'],
-      locationRestriction:{center:c,radius:2500},
-      includedPrimaryTypes:['restaurant','cafe'],
-      maxResultCount:10
+    var q='[out:json][timeout:15];node(around:2500,'+c.lat+','+c.lng+')[amenity~"cafe|restaurant"][name];out 40;';
+    var r=await fetch('https://overpass-api.de/api/interpreter',{
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'data='+encodeURIComponent(q)
     });
-    PL=r.places.filter(function(p){return p.rating}).sort(function(a,b){return b.rating-a.rating}).slice(0,4)
-      .map(function(p){return {id:p.id,name:p.displayName,rating:p.rating,loc:{lat:p.location.lat(),lng:p.location.lng()}}});
+    var j=await r.json();
+    PL=j.elements.map(function(e){
+      return {id:e.id,name:e.tags.name,kind:(e.tags.amenity=='cafe'?'كافيه':'مطعم'),
+        loc:{lat:e.lat,lng:e.lon},d:km(c,{lat:e.lat,lng:e.lon})};
+    }).sort(function(a,b){return a.d-b.d}).slice(0,4);
     if(!PL.length)document.getElementById('list').textContent='مفيش أماكن قريبة من النقطة دي';
   }catch(e){
-    PL=[];document.getElementById('list').textContent='مشكلة في البحث عن الأماكن: '+e.message;
+    PL=[];document.getElementById('list').textContent='مشكلة في البحث عن الأماكن، جرب كمان شوية';
   }
   render();
 }
 
 function render(){
+  if(!map)return;
+  plLayer.clearLayers();
   if(!PL.length)return;
+  PL.forEach(function(p){
+    L.circleMarker([p.loc.lat,p.loc.lng],{radius:7,color:'#f60',fillOpacity:0.9})
+      .bindTooltip(esc(p.name)).addTo(plLayer);
+  });
   var cnt={};
   Object.keys(state.votes).forEach(function(w){var v=state.votes[w];cnt[v]=(cnt[v]||0)+1});
   document.getElementById('list').innerHTML=PL.map(function(p){
     var d=Object.keys(state.people).map(function(n){
       return esc(n)+': '+km(state.people[n],p.loc).toFixed(1)+' كم';
     }).join(' | ');
-    return '<div class="p"><b>'+esc(p.name)+'</b> ⭐'+p.rating+'<br><small>'+d+'</small>'
+    return '<div class="p"><b>'+esc(p.name)+'</b> ('+p.kind+')<br><small>'+d+'</small>'
       +'<button data-id="'+p.id+'" onclick="vote(this.dataset.id)">صوّت ('+(cnt[p.id]||0)+')</button></div>';
   }).join('');
 }
+
+if(EID){
+  map=L.map('map').setView([30.0444,31.2357],11);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+  pLayer=L.layerGroup().addTo(map);
+  plLayer=L.layerGroup().addTo(map);
+  poll();setInterval(poll,4000);
+}
 </script>
-<script async src="https://maps.googleapis.com/maps/api/js?key=__KEY__&callback=init"></script>
 </body></html>`;
 
 function send(res, code, body, type) {
@@ -136,7 +148,7 @@ function readBody(req, cb) {
   req.on('data', function (c) { d += c; });
   req.on('end', function () { try { cb(JSON.parse(d || '{}')); } catch (e) { cb({}); } });
 }
-function page(id) { return PAGE.replace('__ID__', id).replace('__KEY__', KEY); }
+function page(id) { return PAGE.replace('__ID__', id); }
 
 http.createServer(function (req, res) {
   var u = req.url.split('?')[0], m;
